@@ -33,43 +33,6 @@ else
 end
 local lmdb = ffi.load(path)
 
-ffi.cdef[[
-char* 	mdb_version (int* major, int* minor, int* patch);
-char* 	mdb_strerror (int err);
-]]
-
-
-local MDB = {}
-
-function MDB.version()
-	local major = ffi.new("int[1]", 0)
-	local minor = ffi.new("int[1]", 0)
-	local patch = ffi.new("int[1]", 0)
-	local version = lmdb.mdb_version(major,minor,patch)
-	return ffi.string(version),major[0],minor[0],patch[0]
-end
-
-function MDB.error(err)
-	if err == 0 then return end
-	local num = ffi.new("int", err)
-	local res = lmdb.mdb_strerror(num)
-	return ffi.string(res)
-end
-
-local Env = 
-	{MDB_FIXEDMAP   = 0x01
-	,MDB_NOSUBDIR   = 0x4000
-	,MDB_NOSYNC     = 0x10000
-	,MDB_RDONLY     = 0x20000
-	,MDB_NOMETASYNC = 0x40000
-	,MDB_WRITEMAP   = 0x80000
-	,MDB_MAPASYNC   = 0x100000
-	,MDB_NOTLS      = 0x200000
-	,MDB_NOLOCK     = 0x400000
-	,MDB_NORDAHEAD  = 0x800000
-	,MDB_NOMEMINIT  = 0x1000000}
-Env.meta = {__index = Env}
-
 local Txn = 
 	{MDB_RDONLY      = 0x20000
 	,MDB_NOOVERWRITE = 0x10
@@ -111,6 +74,48 @@ local Cursor =
 	,MDB_SET_KEY        = 16
 	,MDB_SET_RANGE      = 17}
 Cursor.meta = {__index = Cursor}
+
+
+local Env = 
+	{MDB_FIXEDMAP   = 0x01
+	,MDB_NOSUBDIR   = 0x4000
+	,MDB_NOSYNC     = 0x10000
+	,MDB_RDONLY     = 0x20000
+	,MDB_NOMETASYNC = 0x40000
+	,MDB_WRITEMAP   = 0x80000
+	,MDB_MAPASYNC   = 0x100000
+	,MDB_NOTLS      = 0x200000
+	,MDB_NOLOCK     = 0x400000
+	,MDB_NORDAHEAD  = 0x800000
+	,MDB_NOMEMINIT  = 0x1000000}
+Env.meta = {__index = Env}
+
+local MDB = 
+	{Txn = Txn
+	,DB = DB
+	,Cursor = Cursor
+	,Env = Env}
+
+
+ffi.cdef[[
+char* 	mdb_version (int* major, int* minor, int* patch);
+char* 	mdb_strerror (int err);
+]]
+
+function MDB.version()
+	local major = ffi.new("int[1]", 0)
+	local minor = ffi.new("int[1]", 0)
+	local patch = ffi.new("int[1]", 0)
+	local version = lmdb.mdb_version(major,minor,patch)
+	return ffi.string(version),major[0],minor[0],patch[0]
+end
+
+function MDB.error(err)
+	if err == 0 then return end
+	local num = ffi.new("int", err)
+	local res = lmdb.mdb_strerror(num)
+	return ffi.string(res)
+end
 
 ffi.cdef[[
 typedef void* MDB_env;
@@ -211,12 +216,14 @@ ffi.cdef(TxnFunctions)
 ffi.cdef(CursorFunctions)
 ffi.cdef(odd_functions)
 
-function Env:create()
+function MDB.create_env()
 	local pointer = ffi.new("MDB_env[1]",ffi.new("MDB_env",nil))
 	local err = lmdb.mdb_env_create(pointer)
 	if err == 0 then
-		local env = {["__env"] = pointer[0]}
-		return setmetatable(env, Env)
+		local env = 
+			{["__env"] = pointer[0]
+			,["__dbs"] = {}}
+		return setmetatable(env, rawget(Env, "meta"))
 	else
 		return nil,MDB.error(err)
 	end
@@ -267,10 +274,10 @@ function Env:close()
 end
 
 function Env:set_flags(flags,onoff)
-	if onoff then
-		onoff = 1
-	else
+	if onoff == false then
 		onoff = 0
+	else
+		onoff = 1
 	end
 	local err = lmdb.mdb_env_set_flags(self.__env,flags,onoff)
 	return MDB.error(err)
@@ -342,10 +349,21 @@ function Env:begin_txn(parent,flags)
 	end
 	local err = lmdb.mdb_txn_begin(self.__env,parent,flags,txn)
 	if err == 0 then
-		local transaction = {["__txn"] = txn[0]}
-		return setmetatable(transaction, Txn)
+		local transaction = 
+			{["__txn"] = txn[0]
+			,["__env"] = self}
+		return setmetatable(transaction, rawget(Txn, "meta"))
 	else
 		return nil,MDB.error(err)
+	end
+end
+
+
+function Env:resolve_db(db)
+	if type(db) == "table" then
+		return assert(db.__dbi,"bad database")
+	elseif type(db) == "string" then
+		return assert(self.__dbs[db],"database is not open")
 	end
 end
 
@@ -371,14 +389,16 @@ function Txn:renew()
 	return MDB.error(lmdb.mdb_txn_renew(self.__txn))
 end
 
-function Txn:put(dbi,key,data,flags)
+function Txn:put(db,key,data,flags)
+	local dbi = self.__env:resolve_db(db)
 	local index = build_MDB_val(key)
 	local value = build_MDB_val(data)
 	local err = lmdb.mdb_put(self.__txn,dbi,index,value,flags)
 	return MDB.error(err)
 end
 
-function Txn:get(dbi,key,cast)
+function Txn:get(db,key,cast)
+	local dbi = self.__env:resolve_db(db)
 	local value = ffi.new("MDB_val[1]")
 
 	local lookup = build_MDB_val(key)
@@ -390,7 +410,8 @@ function Txn:get(dbi,key,cast)
 	return string,MDB.error(err)
 end
 
-function Txn:del(dbi,key,data)
+function Txn:del(db,key,data)
+	local dbi = self.__env:resolve_db(db)
 	local index = build_MDB_val(key)
 	local value
 	if data then
@@ -403,37 +424,59 @@ end
 
 
 function Txn:open_db(name,flags)
-	local index = ffi.new("MDB_dbi[1]")
-	local err = lmdb.mdb_dbi_open(self.__txn,name,flags,index)
-	
-	if err == 0 then
+	local dbi = self.__env.__dbs[name]
+	if dbi then
+		print("getting chached",dbi)
 		local db = 
-			{["__db"] = index[0]
-			,["__txn"] = self.__txn}
-		return setmetatable(db, DB)
+				{["__dbi"] = dbi
+				,["__txn"] = self.__txn
+				,["__env"] = self.__env
+				,["name"] = name}
+				print(dbi,self.__txn,self.__env,name)
+			return setmetatable(db, rawget(DB, "meta"))
 	else
-		return nil,MDB.error(err)
+		local index = ffi.new("MDB_dbi[1]")
+		local err = lmdb.mdb_dbi_open(self.__txn,name,flags,index)
+
+		if err == 0 then
+			local db = 
+				{["__dbi"] = index[0]
+				,["__txn"] = self.__txn
+				,["__env"] = self.__env
+				,["name"] = name}
+			self.__env.__dbs[name] = db.__dbi
+			return setmetatable(db, rawget(DB, "meta"))
+		else
+			return nil,MDB.error(err)
+		end
 	end
 end
 
 function DB:close()
-	lmdb.mdb_dbi_close(self.__txn,self.__db)
+	self.__env.__dbs[self.name] = nil
+	lmdb.mdb_dbi_close(self.__txn,self.__dbi)
 end
 
 function DB:flags()
 	local flags = ffi.new("unsigned int[1]")
-	local err = lmdb.mdb_dbi_flags(self.__txn,self.__db,flags)
+	local err = lmdb.mdb_dbi_flags(self.__txn,self.__dbi,flags)
 	return flags[0],MDB.error(err)
 end
 
 function DB:stat()
 	local stat = ffi.new("MDB_stat[1]")
-	local err = lmdb.mdb_stat(self.__txn,self.__db,stat)
+	local err = lmdb.mdb_stat(self.__txn,self.__dbi,stat)
 	return stat[0],MDB.error(err)
 end
 
 function DB:drop(del)
-	local err = lmdb.mdb_drop(self.__txn,self.__db,del)
+	if del then
+		self.__env.__dbs[self.name] = nil
+		del = 1
+	else
+		del = 0
+	end
+	local err = lmdb.mdb_drop(self.__txn,self.__dbi,del)
 	return MDB.error(err)
 end
 
@@ -441,13 +484,15 @@ end
 
 function DB:open_cursor()
 	local cursor = ffi.new("MDB_cursor[1]",ffi.new("MDB_cursor"))
-	local err = lmdb.mdb_cursor_open(self.__txn,self.__db,cursor)
+	-- this txn might not be valid.
+	-- if not then it is read only??
+	local err = lmdb.mdb_cursor_open(self.__txn,self.__dbi,cursor)
 	
 	if err == 0 then
 		local cur = 
 			{["__cursor"] = cursor[0]
 			,["__txn"] = self.__txn}
-		return setmetatable(cur, DB)
+		return setmetatable(cur, rawget(Cursor, "meta"))
 	else
 		return nil,MDB.error(err)
 	end
@@ -470,6 +515,26 @@ function Cursor:get(key,op,icast,cast)
 		value = build_return(value,cast)
 		return index,value,MDB.error(err)
 	end
+end
+
+function Cursor:first()
+	return self:get(nil,Cursor.MDB_FIRST)
+end
+
+function Cursor:next()
+	return self:get(nil,Cursor.MDB_NEXT)
+end
+
+function Cursor:prev()
+	return self:get(nil,Cursor.MDB_PREV)
+end
+
+function Cursor:set(key)
+	return self:get(nil,Cursor.MDB_SET)
+end
+
+function Cursor:set_key(key)
+	return self:get(nil,Cursor.MDB_SET_KEY)
 end
 
 function build_return(value,cast)
@@ -504,4 +569,4 @@ end
 
 p("using Lightning Memory Mapped Database",MDB.version())
 
-return {Env = Env,DB = DB, Txn = Txn,Cursor = Cursor}
+return MDB

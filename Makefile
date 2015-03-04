@@ -9,3 +9,6 @@ all:
 	@echo
 	@echo "moving lmdb into place"
 	mv ./mdb/libraries/liblmdb/liblmdb.so ./liblmdb.so
+
+test:
+	luajit ./test/run.lua
