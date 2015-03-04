@@ -11,4 +11,5 @@ all:
 	mv ./mdb/libraries/liblmdb/liblmdb.so ./liblmdb.so
 
 test:
-	luajit ./test/run.lua
+	mkdir -p ./tests/fixtures
+	luajit ./tests/run.lua
