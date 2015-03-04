@@ -9,12 +9,6 @@
 -- Created :   6 Feb 2015 by Daniel Barney <daniel@pagodabox.com>
 ---------------------------------------------------------------------
 
--- only exists on luv/luvi/luvit
-if exports then
-	exports.name = "DBarney/lmdb"
-	exports.version = "0.1.0"
-end
-
 local ffi = require("ffi")
 local path = './liblmdb.so'
 
